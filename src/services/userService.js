@@ -1,5 +1,6 @@
-import { supabase, isSupabaseConfigured } from './supabase';
-import { getMockDB, saveMockDB } from './mockDatabase';
+import { supabase, isSupabaseConfigured } from './supabase.js';
+import { getMockDB, saveMockDB } from './mockDatabase.js';
+import { isValidDescriptor } from './faceRecognitionService.js';
 
 export const userService = {
   async getOrganizationUsers() {
@@ -16,6 +17,8 @@ export const userService = {
   },
 
   async getUserFaceDescriptors(userId) {
+    if (!userId) return [];
+
     if (isSupabaseConfigured) {
       const { data, error } = await supabase
         .from('face_registrations')
@@ -23,18 +26,92 @@ export const userService = {
         .eq('user_id', userId)
         .eq('is_active', true);
       if (error) throw error;
-      return data?.map((d) => d.descriptor) || [];
+      return (data?.map((d) => d.descriptor) || []).filter(isValidDescriptor);
     }
 
     const db = getMockDB();
     const reg = db.face_registrations.find((r) => r.user_id === userId && r.is_active);
-    return reg?.descriptors || [];
+    if (!reg || !Array.isArray(reg.descriptors)) return [];
+    return reg.descriptors.filter(isValidDescriptor);
+  },
+
+  /**
+   * Organization-scoped biometric registry for Admin Kiosk.
+   * Returns active employees with genuine enrolled descriptors belonging strictly to organizationId.
+   */
+  async getOrganizationBiometricRegistry(organizationId) {
+    if (!organizationId) return [];
+
+    if (isSupabaseConfigured) {
+      const { data, error } = await supabase
+        .from('face_registrations')
+        .select('id, user_id, descriptors, organization_id, profiles(id, full_name, employee_id, department, avatar_url, is_active)')
+        .eq('organization_id', organizationId)
+        .eq('is_active', true);
+      if (error) throw error;
+
+      return (data || [])
+        .filter((r) => r.profiles && r.profiles.is_active)
+        .map((r) => ({
+          userId: r.user_id,
+          fullName: r.profiles.full_name,
+          employeeId: r.profiles.employee_id,
+          department: r.profiles.department,
+          avatarUrl: r.profiles.avatar_url,
+          organizationId: r.organization_id,
+          descriptors: (Array.isArray(r.descriptors) ? r.descriptors : [r.descriptors]).filter(isValidDescriptor),
+        }))
+        .filter((c) => c.descriptors.length > 0);
+    }
+
+    const db = getMockDB();
+    // Scope strictly to active users in this organization
+    const orgUsers = db.users.filter((u) => u.organization_id === organizationId && u.is_active);
+    const userMap = new Map(orgUsers.map((u) => [u.id, u]));
+
+    const orgRegs = db.face_registrations.filter(
+      (r) => r.organization_id === organizationId && r.is_active && userMap.has(r.user_id)
+    );
+
+    return orgRegs
+      .map((r) => {
+        const u = userMap.get(r.user_id);
+        const validDescriptors = (r.descriptors || []).filter(isValidDescriptor);
+        return {
+          userId: u.id,
+          fullName: u.full_name,
+          employeeId: u.employee_id,
+          department: u.department,
+          avatarUrl: u.avatar_url,
+          organizationId: r.organization_id,
+          descriptors: validDescriptors,
+        };
+      })
+      .filter((c) => c.descriptors.length > 0);
   },
 
   async registerUserFace({ userId, descriptors, consentedAt }) {
+    if (!userId) {
+      throw new Error('User ID is required for biometric registration.');
+    }
+    if (!Array.isArray(descriptors) || descriptors.length === 0) {
+      throw new Error('At least one live facial descriptor is required for enrollment.');
+    }
+
+    // Strict validation: every descriptor must be a genuine 128-d vector
+    for (let i = 0; i < descriptors.length; i++) {
+      if (!isValidDescriptor(descriptors[i])) {
+        throw new Error(`Descriptor at index ${i} is not a valid 128-dimensional biometric embedding.`);
+      }
+    }
+
+    if (!consentedAt) {
+      throw new Error('Explicit biometric consent is required before saving facial templates.');
+    }
+
     if (isSupabaseConfigured) {
       const { data, error } = await supabase.functions.invoke('register-face', {
-        body: { descriptors, biometricConsent: Boolean(consentedAt) },
+        body: { descriptors, biometricConsent: true },
       });
       if (error) throw error;
       return data;
@@ -42,7 +119,7 @@ export const userService = {
 
     const db = getMockDB();
     const user = db.users.find((u) => u.id === userId);
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error('User not found in organization database.');
 
     // Deactivate previous registrations
     db.face_registrations.forEach((r) => {
@@ -53,7 +130,7 @@ export const userService = {
       id: `reg-${Date.now()}`,
       user_id: userId,
       organization_id: user.organization_id,
-      descriptors,
+      descriptors: descriptors.map((d) => Array.from(d)),
       model_version: 'vladmandic-face-api-ssd-128',
       is_active: true,
       consented_at: consentedAt || new Date().toISOString(),

@@ -1,6 +1,12 @@
 // Browser-based Face Recognition Engine
 // Using @vladmandic/face-api with local model weights exclusively
-import * as faceapi from '@vladmandic/face-api';
+let faceapiInstance = null;
+async function getFaceApi() {
+  if (!faceapiInstance) {
+    faceapiInstance = await import('@vladmandic/face-api');
+  }
+  return faceapiInstance;
+}
 
 const LOCAL_MODEL_URL = '/models';
 
@@ -51,10 +57,11 @@ export async function loadFaceRecognitionModels() {
   modelLoadingPromise = (async () => {
     try {
       console.log('Loading face-api neural models from local /models directory...');
+      const api = await getFaceApi();
       await Promise.all([
-        faceapi.nets.tinyFaceDetector.loadFromUri(LOCAL_MODEL_URL),
-        faceapi.nets.faceLandmark68Net.loadFromUri(LOCAL_MODEL_URL),
-        faceapi.nets.faceRecognitionNet.loadFromUri(LOCAL_MODEL_URL),
+        api.nets.tinyFaceDetector.loadFromUri(LOCAL_MODEL_URL),
+        api.nets.faceLandmark68Net.loadFromUri(LOCAL_MODEL_URL),
+        api.nets.faceRecognitionNet.loadFromUri(LOCAL_MODEL_URL),
       ]);
       modelsLoaded = true;
       modelLoadingError = null;
@@ -119,12 +126,13 @@ export async function detectFaceInVideo(videoElement) {
   const videoHeight = videoElement.videoHeight || 480;
 
   try {
-    const options = new faceapi.TinyFaceDetectorOptions({
+    const api = await getFaceApi();
+    const options = new api.TinyFaceDetectorOptions({
       inputSize: 320,
       scoreThreshold: 0.45,
     });
 
-    const detections = await faceapi
+    const detections = await api
       .detectAllFaces(videoElement, options)
       .withFaceLandmarks()
       .withFaceDescriptors();
@@ -313,4 +321,103 @@ export function matchUserFace(liveDescriptor, enrolledDescriptorsList, threshold
   }
 
   return bestMatch;
+}
+
+/**
+ * Organization-wide biometric candidate identification for Kiosk mode.
+ *
+ * Strict Rules (Section 6):
+ * - Compares live descriptor against active enrolled descriptors of authorized employees.
+ * - Identifies best candidate matching below threshold.
+ * - Requires a calibrated minimum separation (margin) between the best and runner-up candidate
+ *   to reject ambiguous matches.
+ * - Rejects any candidate with distance > threshold.
+ * - Never returns a fake match or defaults to an administrator.
+ */
+export function identifyUserInRegistry(
+  liveDescriptor,
+  candidateRegistry,
+  threshold = DEFAULT_MATCH_THRESHOLD,
+  minMargin = 0.05
+) {
+  if (!isValidDescriptor(liveDescriptor)) {
+    return {
+      identified: false,
+      match: false,
+      error: 'INVALID_LIVE_DESCRIPTOR',
+      message: 'Invalid biometric live descriptor',
+    };
+  }
+
+  if (!Array.isArray(candidateRegistry) || candidateRegistry.length === 0) {
+    return {
+      identified: false,
+      match: false,
+      error: 'EMPTY_REGISTRY',
+      message: 'No registered face profiles found in this organization.',
+    };
+  }
+
+  const scores = [];
+
+  for (const candidate of candidateRegistry) {
+    const validDescList = (candidate.descriptors || []).filter(isValidDescriptor);
+    if (validDescList.length === 0) continue;
+
+    let bestCandidateDist = 999;
+    let bestConfidence = 0;
+
+    for (const storedDesc of validDescList) {
+      const comp = compareFaceDescriptors(liveDescriptor, storedDesc, threshold);
+      if (comp.valid && comp.distance < bestCandidateDist) {
+        bestCandidateDist = comp.distance;
+        bestConfidence = comp.confidence;
+      }
+    }
+
+    if (bestCandidateDist <= threshold) {
+      scores.push({
+        candidate,
+        distance: bestCandidateDist,
+        confidence: bestConfidence,
+      });
+    }
+  }
+
+  if (scores.length === 0) {
+    return {
+      identified: false,
+      match: false,
+      reason: 'NO_MATCH',
+      message: 'Face not recognized in organization registry.',
+    };
+  }
+
+  // Sort ascending by distance (lowest distance = highest similarity)
+  scores.sort((a, b) => a.distance - b.distance);
+
+  const topMatch = scores[0];
+
+  // Disambiguation check if multiple candidates are below match threshold
+  if (scores.length > 1) {
+    const runnerUp = scores[1];
+    const margin = runnerUp.distance - topMatch.distance;
+    if (margin < minMargin) {
+      return {
+        identified: false,
+        match: false,
+        reason: 'AMBIGUOUS_MATCH',
+        message: 'Ambiguous biometric match between multiple registered employees.',
+      };
+    }
+  }
+
+  return {
+    identified: true,
+    match: true,
+    user: topMatch.candidate,
+    distance: topMatch.distance,
+    confidence: topMatch.confidence,
+    message: `Identified as ${topMatch.candidate.fullName}`,
+  };
 }

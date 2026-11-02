@@ -56,9 +56,9 @@ export function LiveKiosk({ onBack }) {
         </div>
       </div>
 
-      {/* Main Scanner Widget */}
+      {/* Main Scanner Widget - Organization Kiosk Identification */}
       <AttendanceScanner
-        currentUser={profile}
+        organizationId={profile?.organization_id}
         theme={kioskTheme}
         isKioskMode={true}
       />

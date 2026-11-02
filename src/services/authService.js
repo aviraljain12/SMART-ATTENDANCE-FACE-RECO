@@ -1,5 +1,5 @@
-import { supabase, isSupabaseConfigured } from './supabase';
-import { getMockDB, saveMockDB } from './mockDatabase';
+import { supabase, isSupabaseConfigured } from './supabase.js';
+import { getMockDB, saveMockDB } from './mockDatabase.js';
 
 const ACTIVE_USER_SESSION_KEY = 'faceattend_session_user';
 

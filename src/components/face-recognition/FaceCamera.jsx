@@ -167,11 +167,13 @@ export function FaceCamera({
                         : status === 'matched'
                         ? `${userName} - Verified ✓`
                         : status === 'unregistered'
-                        ? `${userName} - Not Enrolled`
+                        ? 'Face Not Registered'
                         : status === 'alignment_required'
-                        ? `${userName} - Face Forward`
+                        ? 'Face Forward'
                         : status === 'rejected'
-                        ? 'Mismatch - Not Recognized'
+                        ? 'Face Mismatch'
+                        : status === 'multiple_faces'
+                        ? 'Multiple Faces'
                         : userName}
                     </div>
                   </motion.div>

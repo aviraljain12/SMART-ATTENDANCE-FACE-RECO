@@ -8,12 +8,13 @@ import { attendanceService } from '../../services/attendanceService';
 
 export function AttendanceScanner({
   currentUser,
+  organizationId,
   theme = 'dark', // 'dark' | 'light'
   onAttendanceSuccess,
   isKioskMode = false,
 }) {
   const [currentTime, setCurrentTime] = useState(getCurrentLiveTime());
-  const [stats, setStats] = useState({ total: 7, present: 1 });
+  const [stats, setStats] = useState({ total: 6, present: 0 });
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDept, setSelectedDept] = useState('All Departments');
 
@@ -40,8 +41,8 @@ export function AttendanceScanner({
     try {
       const data = await attendanceService.getAdminDashboardMetrics();
       setStats({
-        total: data?.totalEmployees || 7,
-        present: data?.presentToday || 1,
+        total: data?.totalEmployees || 6,
+        present: data?.presentToday || 0,
       });
     } catch (err) {
       console.warn('Could not refresh stats:', err);
@@ -59,17 +60,22 @@ export function AttendanceScanner({
     refreshStats();
   }, [refreshStats]);
 
-  // Face Recognition Hook
+  const effectiveOrgId = organizationId || currentUser?.organization_id;
+
+  // Face Recognition Hook (Supports Targeted Employee Mode & Organization Kiosk Mode)
   const {
     status,
     feedbackMessage,
     detectedBox,
     recognitionLogs,
+    identifiedUser,
     resetScanner,
   } = useFaceRecognition({
     videoRef,
     isActive,
-    targetUserId: currentUser?.id,
+    targetUserId: isKioskMode ? null : currentUser?.id,
+    organizationId: effectiveOrgId,
+    isKioskMode,
     autoMarkAttendance: true,
     onAttendanceSuccess: handleAttendanceSuccess,
   });
@@ -99,9 +105,27 @@ export function AttendanceScanner({
 
   const isDark = theme === 'dark';
 
+  // Filter real recognition logs
+  const filteredLogs = recognitionLogs.filter((log) => {
+    if (selectedDept !== 'All Departments' && log.department && log.department !== selectedDept) {
+      return false;
+    }
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const matchName = log.userName?.toLowerCase().includes(q);
+      const matchId = log.employeeId?.toLowerCase().includes(q);
+      if (!matchName && !matchId) return false;
+    }
+    return true;
+  });
+
+  const displayUserName = isKioskMode
+    ? (identifiedUser ? identifiedUser.fullName : 'Face Scanner')
+    : (currentUser?.full_name || 'Employee');
+
   return (
     <div className={`space-y-6 ${isDark ? 'text-white' : 'text-slate-900'}`}>
-      {/* Top Metric Bar matching Screenshot 1 (Live Attendance / Stats Cards) */}
+      {/* Top Metric Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
         {/* Total Employees */}
         <div className={`p-4 rounded-2xl border flex items-center space-x-3.5 transition-all ${
@@ -160,7 +184,7 @@ export function AttendanceScanner({
         </div>
       </div>
 
-      {/* Main Scanner Section (2 Columns matching Screenshot 2) */}
+      {/* Main Scanner Section (2 Columns) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left Column: Live Camera */}
         <div className="lg:col-span-8">
@@ -176,12 +200,12 @@ export function AttendanceScanner({
             detectedBox={detectedBox}
             status={status}
             feedbackMessage={feedbackMessage}
-            userName={currentUser?.full_name || 'Verified User'}
+            userName={displayUserName}
             theme={theme}
           />
         </div>
 
-        {/* Right Column: Recognitions & Department Filter (Screenshot 2 right drawer) */}
+        {/* Right Column: Genuine Recognitions & Department Filter */}
         <div className={`lg:col-span-4 rounded-2xl border p-4 sm:p-5 flex flex-col h-full min-h-[460px] ${
           isDark ? 'bg-slate-900/90 border-slate-800' : 'bg-white border-slate-200/80 shadow-sm'
         }`}>
@@ -210,7 +234,7 @@ export function AttendanceScanner({
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search name or ID..."
+              placeholder="Search verified name or ID..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className={`w-full pl-8 pr-3 py-1.5 text-xs rounded-xl border focus:outline-none focus:ring-2 focus:ring-brand-500 ${
@@ -223,53 +247,31 @@ export function AttendanceScanner({
           <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
               <History className="w-3.5 h-3.5 text-brand-500" />
-              Live Recognitions
+              Verified Recognitions
             </span>
-            <span className="text-[11px] font-mono text-emerald-400">Active</span>
+            <span className="text-[11px] font-mono text-emerald-400">Live</span>
           </div>
 
-          {/* Recognitions List */}
+          {/* Recognitions List: Shows ONLY actual verified check-in events */}
           <div className="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/60 mt-2 space-y-1 max-h-[300px]">
-            {/* Show simulated recent team recognitions matching Screenshot 2 */}
-            <div className="py-2.5 flex items-center justify-between text-xs">
-              <div>
-                <div className="font-semibold">{currentUser?.full_name || 'Damian Vance'}</div>
-                <div className="text-[11px] text-slate-400 font-mono">
-                  {status === 'already_marked' ? 'Already marked' : status === 'matched' ? 'Checked in' : 'In scan zone'}
-                </div>
+            {filteredLogs.length === 0 ? (
+              <div className="py-12 text-center text-xs text-slate-400">
+                <p>No verified attendance recognitions recorded yet today.</p>
+                <p className="text-[10px] text-slate-500 mt-1">Arriving employees will appear here upon genuine face verification.</p>
               </div>
-              <span className="font-mono text-[11px] text-slate-400">{currentTime}</span>
-            </div>
-
-            <div className="py-2.5 flex items-center justify-between text-xs">
-              <div>
-                <div className="font-semibold text-slate-300">Elena Rostova</div>
-                <div className="text-[11px] text-emerald-400 flex items-center gap-1 font-mono">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Present
+            ) : (
+              filteredLogs.map((log) => (
+                <div key={log.id} className="py-2.5 flex items-center justify-between text-xs">
+                  <div>
+                    <div className="font-semibold text-brand-400">{log.userName}</div>
+                    <div className="text-[11px] text-slate-400 font-mono">
+                      {log.status} {log.employeeId ? `• ${log.employeeId}` : ''}
+                    </div>
+                  </div>
+                  <span className="font-mono text-[11px] text-slate-400">{log.timestamp}</span>
                 </div>
-              </div>
-              <span className="font-mono text-[11px] text-slate-400">09:12 AM</span>
-            </div>
-
-            <div className="py-2.5 flex items-center justify-between text-xs">
-              <div>
-                <div className="font-semibold text-slate-300">Sarah Jenkins</div>
-                <div className="text-[11px] text-emerald-400 flex items-center gap-1 font-mono">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Present
-                </div>
-              </div>
-              <span className="font-mono text-[11px] text-slate-400">09:05 AM</span>
-            </div>
-
-            {recognitionLogs.map((log) => (
-              <div key={log.id} className="py-2.5 flex items-center justify-between text-xs">
-                <div>
-                  <div className="font-semibold text-brand-400">{currentUser?.full_name}</div>
-                  <div className="text-[11px] text-slate-400 font-mono">{log.status}</div>
-                </div>
-                <span className="font-mono text-[11px] text-slate-400">{log.timestamp}</span>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       </div>

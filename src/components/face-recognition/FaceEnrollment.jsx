@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Camera, Check, Shield, AlertTriangle, ArrowRight, RefreshCw, Lock } from 'lucide-react';
 import { useCamera } from '../../hooks/useCamera';
-import { detectFaceInVideo, loadFaceRecognitionModels } from '../../services/faceRecognitionService';
+import { detectFaceInVideo, loadFaceRecognitionModels, isValidDescriptor } from '../../services/faceRecognitionService';
 import { userService } from '../../services/userService';
 
 const STEPS = [
@@ -37,8 +37,13 @@ export function FaceEnrollment({ user, onComplete, onCancel }) {
 
   const handleCaptureSample = async () => {
     if (!videoRef.current || isCapturing) return;
+    if (!hasConsented) {
+      setFeedback('Biometric consent is mandatory prior to facial vector capture.');
+      return;
+    }
+
     setIsCapturing(true);
-    setFeedback('Analyzing facial landmarks...');
+    setFeedback('Analyzing facial landmarks and generating 128-d biometric embedding...');
 
     try {
       const result = await detectFaceInVideo(videoRef.current);
@@ -50,40 +55,64 @@ export function FaceEnrollment({ user, onComplete, onCancel }) {
       }
 
       if (!result.detected) {
-        setFeedback(result.message || 'Face not detected. Look directly at the lens.');
+        setFeedback(result.message || 'Face not detected. Look directly at the camera.');
         setIsCapturing(false);
         return;
       }
 
       if (result.multipleFaces) {
-        setFeedback('Multiple faces detected. Ensure you are alone in frame.');
+        setFeedback('Multiple faces detected! Ensure you are alone in frame.');
         setIsCapturing(false);
         return;
       }
 
-      // Valid sample captured
+      if (!result.isFaceAligned) {
+        setFeedback('Please look directly at the camera (face forward) to capture sample.');
+        setIsCapturing(false);
+        return;
+      }
+
+      if (!isValidDescriptor(result.descriptor)) {
+        setFeedback('Captured descriptor is invalid. Please reposition and retry.');
+        setIsCapturing(false);
+        return;
+      }
+
+      // Valid genuine live biometric sample captured
       const newSamples = [...samples, result.descriptor];
       setSamples(newSamples);
 
       if (currentStep < 3) {
+        const nextStepIndex = currentStep; // 1 -> index 1 (Slight Left)
         setCurrentStep(currentStep + 1);
-        setFeedback(STEPS[currentStep].prompt);
+        setFeedback(STEPS[nextStepIndex] ? STEPS[nextStepIndex].prompt : 'Reposition face');
       } else {
-        // All 3 samples captured, save to DB!
+        // All 3 live samples captured - validate every descriptor before persistence
+        const allValid = newSamples.length === 3 && newSamples.every(isValidDescriptor);
+        if (!allValid) {
+          throw new Error('One or more captured biometric samples failed integrity validation.');
+        }
+
         setIsSaving(true);
-        setFeedback('Encrypting and securing biometric descriptors...');
-        await userService.registerUserFace({
+        setFeedback('Securing and indexing verified biometric vectors...');
+
+        const saveRes = await userService.registerUserFace({
           userId: user.id,
           descriptors: newSamples,
           consentedAt: new Date().toISOString(),
         });
+
+        if (!saveRes || !saveRes.success) {
+          throw new Error(saveRes?.message || 'Biometric storage failed. Please retry.');
+        }
+
         setIsSaving(false);
-        setCurrentStep(4);
         stopCamera();
-        if (onComplete) onComplete();
+        setCurrentStep(4);
       }
     } catch (err) {
-      setFeedback('Capture error: ' + err.message);
+      console.error('Enrollment error:', err);
+      setFeedback('Capture error: ' + (err.message || 'Unknown error'));
     } finally {
       setIsCapturing(false);
     }

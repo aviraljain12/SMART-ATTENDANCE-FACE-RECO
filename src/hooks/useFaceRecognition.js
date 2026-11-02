@@ -3,6 +3,7 @@ import {
   loadFaceRecognitionModels,
   detectFaceInVideo,
   matchUserFace,
+  identifyUserInRegistry,
   DEFAULT_MATCH_THRESHOLD,
   isValidDescriptor,
 } from '../services/faceRecognitionService';
@@ -14,6 +15,8 @@ export function useFaceRecognition({
   videoRef,
   isActive,
   targetUserId = null,
+  organizationId = null,
+  isKioskMode = false,
   matchThreshold = DEFAULT_MATCH_THRESHOLD,
   autoMarkAttendance = true,
   onAttendanceSuccess = null,
@@ -39,13 +42,17 @@ export function useFaceRecognition({
   const [recognitionConfidence, setRecognitionConfidence] = useState(0);
   const [detectionScore, setDetectionScore] = useState(0);
   const [recognitionLogs, setRecognitionLogs] = useState([]);
+  const [identifiedUser, setIdentifiedUser] = useState(null);
 
   // Internal lifecycle & lock refs
   const isProcessingRef = useRef(false);
   const consecutiveMatchesRef = useRef(0);
   const enrolledDescriptorsRef = useRef([]);
-  const attendanceSubmittedRef = useRef(false); // In-flight or submitted lock
-  const hasCompletedAttendanceRef = useRef(false); // Locked permanently for this user (success / already_marked)
+  const kioskRegistryRef = useRef([]);
+  const kioskIdentifiedUserRef = useRef(null);
+  const kioskAttendanceLockMapRef = useRef(new Set()); // Prevents duplicate check-ins in kiosk mode
+  const attendanceSubmittedRef = useRef(false); // In-flight or submitted lock for single user
+  const hasCompletedAttendanceRef = useRef(false); // Locked permanently for single user
   const activeUserIdRef = useRef(targetUserId);
   const sessionRef = useRef(0); // Generation counter to invalidate stale async inferences
 
@@ -89,32 +96,83 @@ export function useFaceRecognition({
     };
   }, []);
 
-  // 2. Fetch Enrolled Descriptors whenever targetUserId changes
+  // 2. Fetch Enrolled Descriptors (Target User mode OR Organization Kiosk mode)
   useEffect(() => {
     let isCancelled = false;
 
-    // Invalidate any in-flight inference or API requests from previous user
+    // Invalidate any in-flight inference or API requests from previous user/mode
     sessionRef.current += 1;
     activeUserIdRef.current = targetUserId;
 
-    // Reset all scanner state safely for target user change
+    // Reset scanner states safely
     consecutiveMatchesRef.current = 0;
     attendanceSubmittedRef.current = false;
     hasCompletedAttendanceRef.current = false;
     isProcessingRef.current = false;
     enrolledDescriptorsRef.current = [];
+    kioskRegistryRef.current = [];
+    kioskIdentifiedUserRef.current = null;
+    setIdentifiedUser(null);
     setEnrolledCount(0);
     setDetectedBox(null);
     setRecognitionConfidence(0);
     setDetectionScore(0);
 
+    // Kiosk Mode: Load organization-wide genuine biometric registry
+    if (isKioskMode) {
+      if (!organizationId) {
+        setDescriptorsStatus('empty');
+        setStatus('unregistered');
+        setFeedbackMessage('Organization ID required for terminal identification.');
+        return;
+      }
+
+      async function fetchKioskRegistry() {
+        setDescriptorsStatus('loading');
+        setDescriptorsError(null);
+        try {
+          const registry = await userService.getOrganizationBiometricRegistry(organizationId);
+          if (isCancelled) return;
+
+          if (!Array.isArray(registry) || registry.length === 0) {
+            kioskRegistryRef.current = [];
+            setEnrolledCount(0);
+            setDescriptorsStatus('empty');
+            setStatus('unregistered');
+            setFeedbackMessage('No enrolled employees found in this organization.');
+            return;
+          }
+
+          kioskRegistryRef.current = registry;
+          setEnrolledCount(registry.length);
+          setDescriptorsStatus('loaded');
+          setDescriptorsError(null);
+        } catch (err) {
+          if (isCancelled) return;
+          console.error('Failed to load organization registry:', err);
+          kioskRegistryRef.current = [];
+          setEnrolledCount(0);
+          setDescriptorsStatus('error');
+          setDescriptorsError(err.message);
+          setStatus('backend_error');
+          setFeedbackMessage('Error loading biometric registry: ' + err.message);
+        }
+      }
+
+      fetchKioskRegistry();
+      return () => {
+        isCancelled = true;
+      };
+    }
+
+    // Single-Employee Mode: Load target user's genuine descriptors
     if (!targetUserId) {
       setDescriptorsStatus('idle');
       setDescriptorsError(null);
       return;
     }
 
-    async function fetchDescriptors() {
+    async function fetchUserDescriptors() {
       setDescriptorsStatus('loading');
       setDescriptorsError(null);
 
@@ -127,11 +185,10 @@ export function useFaceRecognition({
           setEnrolledCount(0);
           setDescriptorsStatus('empty');
           setStatus('unregistered');
-          setFeedbackMessage('No registered facial profile. Please enroll your face first.');
+          setFeedbackMessage('Face Not Registered');
           return;
         }
 
-        // Validate each descriptor
         const validDescriptors = rawDescriptors.filter(isValidDescriptor);
 
         if (validDescriptors.length === 0) {
@@ -139,7 +196,7 @@ export function useFaceRecognition({
           setEnrolledCount(0);
           setDescriptorsStatus('empty');
           setStatus('unregistered');
-          setFeedbackMessage('Registered biometric vectors are invalid. Please re-enroll.');
+          setFeedbackMessage('Face Not Registered');
           return;
         }
 
@@ -156,16 +213,16 @@ export function useFaceRecognition({
         setDescriptorsStatus('error');
         setDescriptorsError(msg);
         setStatus('backend_error');
-        setFeedbackMessage('Unable to load biometric profile: ' + msg);
+        setFeedbackMessage('Recognition unavailable: ' + msg);
       }
     }
 
-    fetchDescriptors();
+    fetchUserDescriptors();
 
     return () => {
       isCancelled = true;
     };
-  }, [targetUserId]);
+  }, [targetUserId, organizationId, isKioskMode]);
 
   // 3. Status Coordination Effect (independent of recognition loop)
   useEffect(() => {
@@ -187,29 +244,27 @@ export function useFaceRecognition({
       setFeedbackMessage('Loading neural recognition models...');
     } else if (modelsStatus === 'error') {
       setStatus('models_error');
-      setFeedbackMessage('Face recognition neural models are unavailable.');
+      setFeedbackMessage('Recognition unavailable');
     } else if (descriptorsStatus === 'loading') {
       setStatus('loading_descriptors');
-      setFeedbackMessage('Loading authorized biometric profile...');
-    } else if (descriptorsStatus === 'empty' || descriptorsStatus === 'idle') {
+      setFeedbackMessage('Loading biometric registry...');
+    } else if (descriptorsStatus === 'empty') {
       setStatus('unregistered');
-      setFeedbackMessage('No biometric profile found for this user. Recognition unavailable.');
+      setFeedbackMessage('Face Not Registered');
     } else if (descriptorsStatus === 'error') {
       setStatus('backend_error');
-      setFeedbackMessage('Error accessing biometric registry.');
+      setFeedbackMessage('Recognition unavailable');
     }
   }, [isActive, modelsStatus, descriptorsStatus]);
 
   // 4. Main Recognition Loop
-  // NOTE: Starts ONLY when camera, models, and descriptors are ready.
-  // 'status' is NOT in the dependencies, preventing loop re-initialization on status changes.
   useEffect(() => {
     const isReady =
       isActive &&
       Boolean(videoRef.current) &&
       modelsStatus === 'loaded' &&
       descriptorsStatus === 'loaded' &&
-      Boolean(targetUserId);
+      (Boolean(targetUserId) || isKioskMode);
 
     if (!isReady) {
       return;
@@ -231,11 +286,11 @@ export function useFaceRecognition({
     let intervalId = null;
 
     const runRecognitionCycle = async () => {
-      // Guard against overlapping inference, cancelled session, or non-playing video
+      // Guard against overlapping inference, cancelled session, or paused video
       if (
         isProcessingRef.current ||
         sessionRef.current !== currentSession ||
-        activeUserIdRef.current !== currentUserId ||
+        (!isKioskMode && activeUserIdRef.current !== currentUserId) ||
         !videoRef.current ||
         videoRef.current.paused ||
         videoRef.current.ended
@@ -249,19 +304,19 @@ export function useFaceRecognition({
         // Step A: Neural Face Detection & Feature Extraction
         const detectionResult = await detectFaceInVideo(videoRef.current);
 
-        // Guard against stale in-flight results if user changed or scanner stopped during inference
+        // Guard against stale in-flight results if user/mode changed during inference
         if (
           sessionRef.current !== currentSession ||
-          activeUserIdRef.current !== currentUserId ||
+          (!isKioskMode && activeUserIdRef.current !== currentUserId) ||
           !videoRef.current
         ) {
           return;
         }
 
-        // If models are unexpectedly not ready or detection failed
+        // If models unexpectedly failed
         if (!detectionResult.modelsReady) {
           setStatus('models_error');
-          setFeedbackMessage(detectionResult.message || 'Models unavailable');
+          setFeedbackMessage('Recognition unavailable');
           setDetectedBox(null);
           consecutiveMatchesRef.current = 0;
           return;
@@ -271,14 +326,11 @@ export function useFaceRecognition({
         if (!detectionResult.detected) {
           if (detectionResult.multipleFaces) {
             setStatus('multiple_faces');
-            setFeedbackMessage(
-              `Multiple faces (${detectionResult.count}) detected! Only 1 person permitted.`
-            );
+            setFeedbackMessage('Multiple Faces Detected');
           } else {
-            // Keep status 'already_marked' or 'matched' if already completed today
             if (!hasCompletedAttendanceRef.current) {
               setStatus('scanning');
-              setFeedbackMessage(detectionResult.message || 'Position your face within the frame');
+              setFeedbackMessage('No Face Detected');
             }
           }
           setDetectedBox(null);
@@ -295,7 +347,6 @@ export function useFaceRecognition({
         setDetectionScore(detectionResult.detectionScore || 0);
 
         // Step B: Face Alignment Validation
-        // Requires looking directly at camera before evaluating biometric vector
         if (!detectionResult.isFaceAligned) {
           setStatus('alignment_required');
           setFeedbackMessage('Please look directly at the camera (face forward).');
@@ -303,120 +354,214 @@ export function useFaceRecognition({
           return;
         }
 
-        // Step C: Biometric Vector Comparison against Enrolled Descriptors
-        const enrolled = enrolledDescriptorsRef.current;
-
-        // Fail closed if enrolled descriptors are missing or empty
-        if (!Array.isArray(enrolled) || enrolled.length === 0) {
-          setStatus('unregistered');
-          setFeedbackMessage('No registered biometric descriptors available for this user.');
-          consecutiveMatchesRef.current = 0;
-          return;
-        }
-
-        const matchResult = matchUserFace(
-          detectionResult.descriptor,
-          enrolled,
-          matchThresholdRef.current
-        );
-
-        // Final cancellation check before state updates
-        if (
-          sessionRef.current !== currentSession ||
-          activeUserIdRef.current !== currentUserId
-        ) {
-          return;
-        }
-
-        // Reject if identity does not match - reset consecutive matches count
-        if (!matchResult.match) {
-          consecutiveMatchesRef.current = 0;
-          setRecognitionConfidence(matchResult.confidence);
-          setStatus('rejected');
-          setFeedbackMessage('Face not recognized. Biometric mismatch.');
-          return;
-        }
-
-        // Identity Match Verified
-        setRecognitionConfidence(matchResult.confidence);
-        consecutiveMatchesRef.current += 1;
-
-        // Require 2 consecutive matching frames to prevent camera noise triggers
-        if (consecutiveMatchesRef.current >= 2) {
-          if (!hasCompletedAttendanceRef.current) {
-            setStatus('matched');
-            setFeedbackMessage('Identity verified via facial biometrics.');
+        // Step C: Biometric Vector Comparison
+        if (isKioskMode) {
+          // Organization-Scoped Multi-Candidate Identification Flow (Section 6)
+          const registry = kioskRegistryRef.current;
+          if (!Array.isArray(registry) || registry.length === 0) {
+            setStatus('unregistered');
+            setFeedbackMessage('No enrolled employees found in this organization.');
+            consecutiveMatchesRef.current = 0;
+            return;
           }
 
-          // Step D: Trigger Attendance (with strict locking)
-          if (
-            autoMarkAttendanceRef.current &&
-            currentUserId &&
-            !attendanceSubmittedRef.current &&
-            !hasCompletedAttendanceRef.current
-          ) {
-            // Lock immediately to prevent duplicate concurrent API requests
-            attendanceSubmittedRef.current = true;
+          const identResult = identifyUserInRegistry(
+            detectionResult.descriptor,
+            registry,
+            matchThresholdRef.current
+          );
 
-            try {
-              const attResult = await attendanceService.markAttendance({
-                userId: currentUserId,
-                matchConfidence: matchResult.confidence,
-                verificationMethod: 'Face Recognition',
-              });
+          if (sessionRef.current !== currentSession) return;
 
-              // Guard against state mutation if target user changed during network call
-              if (
-                sessionRef.current !== currentSession ||
-                activeUserIdRef.current !== currentUserId
-              ) {
-                return;
-              }
+          if (!identResult.identified) {
+            consecutiveMatchesRef.current = 0;
+            kioskIdentifiedUserRef.current = null;
+            setIdentifiedUser(null);
+            setStatus('rejected');
+            setFeedbackMessage('Face Mismatch');
+            return;
+          }
 
-              const logItem = {
-                id: Date.now(),
-                timestamp: new Date().toLocaleTimeString(),
-                status: attResult.alreadyMarked ? 'Already Marked' : 'Marked',
-                success: !attResult.alreadyMarked,
-                confidence: matchResult.confidence,
-              };
-              setRecognitionLogs((prev) => [logItem, ...prev.slice(0, 9)]);
+          const matchedUser = identResult.user;
+          setRecognitionConfidence(identResult.confidence);
+          setIdentifiedUser(matchedUser);
 
-              if (attResult.alreadyMarked) {
-                hasCompletedAttendanceRef.current = true;
-                attendanceSubmittedRef.current = true; // Retain lock
-                setStatus('already_marked');
-                setFeedbackMessage('You have already marked your attendance today.');
-              } else if (attResult.success) {
-                hasCompletedAttendanceRef.current = true;
-                attendanceSubmittedRef.current = true; // Retain lock
-                setStatus('matched');
-                setFeedbackMessage(attResult.message || 'Attendance marked successfully!');
-                try {
-                  confetti({ particleCount: 50, spread: 60, origin: { y: 0.7 } });
-                } catch {}
+          // Require 2 consecutive matching frames for the exact same identified employee
+          if (kioskIdentifiedUserRef.current?.userId === matchedUser.userId) {
+            consecutiveMatchesRef.current += 1;
+          } else {
+            kioskIdentifiedUserRef.current = matchedUser;
+            consecutiveMatchesRef.current = 1;
+          }
 
-                if (onAttendanceSuccessRef.current) {
-                  onAttendanceSuccessRef.current(attResult.record);
+          if (consecutiveMatchesRef.current >= 2) {
+            setStatus('matched');
+            setFeedbackMessage(`Identity Verified: ${matchedUser.fullName}`);
+
+            // Trigger attendance for identified employee
+            if (
+              autoMarkAttendanceRef.current &&
+              !kioskAttendanceLockMapRef.current.has(matchedUser.userId)
+            ) {
+              kioskAttendanceLockMapRef.current.add(matchedUser.userId);
+
+              try {
+                const attResult = await attendanceService.markAttendance({
+                  userId: matchedUser.userId,
+                  matchConfidence: identResult.confidence,
+                  verificationMethod: 'Face Recognition',
+                });
+
+                if (sessionRef.current !== currentSession) return;
+
+                const logItem = {
+                  id: Date.now(),
+                  userName: matchedUser.fullName,
+                  employeeId: matchedUser.employeeId,
+                  timestamp: new Date().toLocaleTimeString(),
+                  status: attResult.alreadyMarked ? 'Already Marked' : 'Marked',
+                  success: !attResult.alreadyMarked,
+                  confidence: identResult.confidence,
+                };
+                setRecognitionLogs((prev) => [logItem, ...prev.slice(0, 9)]);
+
+                if (attResult.alreadyMarked) {
+                  setStatus('already_marked');
+                  setFeedbackMessage(`${matchedUser.fullName} has already marked attendance today.`);
+                } else if (attResult.success) {
+                  setStatus('matched');
+                  setFeedbackMessage(attResult.message || `Attendance marked for ${matchedUser.fullName}`);
+                  try {
+                    confetti({ particleCount: 50, spread: 60, origin: { y: 0.7 } });
+                  } catch {}
+
+                  if (onAttendanceSuccessRef.current) {
+                    onAttendanceSuccessRef.current(attResult.record);
+                  }
+                } else {
+                  kioskAttendanceLockMapRef.current.delete(matchedUser.userId);
+                  setStatus('backend_error');
+                  setFeedbackMessage('Attendance Not Marked: ' + (attResult.message || 'Server rejected'));
                 }
-              } else {
-                // Server rejected with failure - unlock for potential retry
+              } catch (err) {
+                if (sessionRef.current !== currentSession) return;
+                console.error('Kiosk attendance error:', err);
+                kioskAttendanceLockMapRef.current.delete(matchedUser.userId);
+                setStatus('backend_error');
+                setFeedbackMessage('Attendance Not Marked: ' + err.message);
+              }
+            }
+          }
+        } else {
+          // Single-Employee Targeted Comparison Flow (Section 5)
+          const enrolled = enrolledDescriptorsRef.current;
+
+          if (!Array.isArray(enrolled) || enrolled.length === 0) {
+            setStatus('unregistered');
+            setFeedbackMessage('Face Not Registered');
+            consecutiveMatchesRef.current = 0;
+            return;
+          }
+
+          const matchResult = matchUserFace(
+            detectionResult.descriptor,
+            enrolled,
+            matchThresholdRef.current
+          );
+
+          if (
+            sessionRef.current !== currentSession ||
+            activeUserIdRef.current !== currentUserId
+          ) {
+            return;
+          }
+
+          // Mismatch against authenticated user's enrolled template
+          if (!matchResult.match) {
+            consecutiveMatchesRef.current = 0;
+            setRecognitionConfidence(matchResult.confidence);
+            setStatus('rejected');
+            setFeedbackMessage('Face Mismatch');
+            return;
+          }
+
+          // Identity Match Verified
+          setRecognitionConfidence(matchResult.confidence);
+          consecutiveMatchesRef.current += 1;
+
+          if (consecutiveMatchesRef.current >= 2) {
+            if (!hasCompletedAttendanceRef.current) {
+              setStatus('matched');
+              setFeedbackMessage('Identity Verified');
+            }
+
+            // Step D: Trigger Attendance (with strict locking)
+            if (
+              autoMarkAttendanceRef.current &&
+              currentUserId &&
+              !attendanceSubmittedRef.current &&
+              !hasCompletedAttendanceRef.current
+            ) {
+              attendanceSubmittedRef.current = true;
+
+              try {
+                const attResult = await attendanceService.markAttendance({
+                  userId: currentUserId,
+                  matchConfidence: matchResult.confidence,
+                  verificationMethod: 'Face Recognition',
+                });
+
+                if (
+                  sessionRef.current !== currentSession ||
+                  activeUserIdRef.current !== currentUserId
+                ) {
+                  return;
+                }
+
+                const logItem = {
+                  id: Date.now(),
+                  userName: 'Verified User',
+                  timestamp: new Date().toLocaleTimeString(),
+                  status: attResult.alreadyMarked ? 'Already Marked' : 'Marked',
+                  success: !attResult.alreadyMarked,
+                  confidence: matchResult.confidence,
+                };
+                setRecognitionLogs((prev) => [logItem, ...prev.slice(0, 9)]);
+
+                if (attResult.alreadyMarked) {
+                  hasCompletedAttendanceRef.current = true;
+                  attendanceSubmittedRef.current = true;
+                  setStatus('already_marked');
+                  setFeedbackMessage('You have already marked your attendance today.');
+                } else if (attResult.success) {
+                  hasCompletedAttendanceRef.current = true;
+                  attendanceSubmittedRef.current = true;
+                  setStatus('matched');
+                  setFeedbackMessage(attResult.message || 'Identity Verified - Attendance marked successfully!');
+                  try {
+                    confetti({ particleCount: 50, spread: 60, origin: { y: 0.7 } });
+                  } catch {}
+
+                  if (onAttendanceSuccessRef.current) {
+                    onAttendanceSuccessRef.current(attResult.record);
+                  }
+                } else {
+                  attendanceSubmittedRef.current = false;
+                  setStatus('backend_error');
+                  setFeedbackMessage('Attendance Not Marked: ' + (attResult.message || 'Server rejected'));
+                }
+              } catch (err) {
+                if (
+                  sessionRef.current !== currentSession ||
+                  activeUserIdRef.current !== currentUserId
+                ) {
+                  return;
+                }
+                console.error('Attendance API error:', err);
                 attendanceSubmittedRef.current = false;
                 setStatus('backend_error');
-                setFeedbackMessage(attResult.message || 'Attendance rejected by server.');
+                setFeedbackMessage('Attendance Not Marked: ' + err.message);
               }
-            } catch (err) {
-              if (
-                sessionRef.current !== currentSession ||
-                activeUserIdRef.current !== currentUserId
-              ) {
-                return;
-              }
-              console.error('Attendance API error:', err);
-              // Unlock only on genuine network/backend error so user can re-attempt
-              attendanceSubmittedRef.current = false;
-              setStatus('backend_error');
-              setFeedbackMessage('Network or backend error recording attendance: ' + err.message);
             }
           }
         }
@@ -434,14 +579,14 @@ export function useFaceRecognition({
         clearInterval(intervalId);
       }
     };
-  }, [isActive, modelsStatus, descriptorsStatus, targetUserId, videoRef]);
+  }, [isActive, modelsStatus, descriptorsStatus, targetUserId, organizationId, isKioskMode, videoRef]);
 
   // Reset Scanner
-  // Note: If attendance was already successfully marked or already marked today,
-  // scanner reset does NOT permit a second submission.
   const resetScanner = useCallback(() => {
     consecutiveMatchesRef.current = 0;
     setDetectedBox(null);
+    setIdentifiedUser(null);
+    kioskIdentifiedUserRef.current = null;
 
     if (!hasCompletedAttendanceRef.current) {
       attendanceSubmittedRef.current = false;
@@ -464,6 +609,7 @@ export function useFaceRecognition({
     recognitionConfidence,
     detectionScore,
     recognitionLogs,
+    identifiedUser,
     resetScanner,
   };
 }
