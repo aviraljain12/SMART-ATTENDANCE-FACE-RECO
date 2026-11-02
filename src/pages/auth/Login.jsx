@@ -1,11 +1,15 @@
 import React, { useState } from 'react';
-import { ScanFace, Lock, Mail, ArrowRight, ShieldCheck, Sparkles, AlertCircle } from 'lucide-react';
+import { ScanFace, Lock, Mail, ArrowRight, ShieldCheck, Sparkles, AlertCircle, User, IdCard } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 
 export function Login({ onLoginSuccess }) {
-  const { login, switchDemoRole } = useAuth();
+  const { login, register, switchDemoRole } = useAuth();
+  const [mode, setMode] = useState('login'); // 'login' | 'register'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [employeeId, setEmployeeId] = useState('');
+  const [department, setDepartment] = useState('Engineering Department');
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -14,10 +18,14 @@ export function Login({ onLoginSuccess }) {
     setError('');
     setIsSubmitting(true);
     try {
-      await login(email, password);
+      if (mode === 'login') {
+        await login(email, password);
+      } else {
+        await register({ fullName, employeeId, email, password, department });
+      }
       if (onLoginSuccess) onLoginSuccess();
     } catch (err) {
-      setError(err.message || 'Login failed');
+      setError(err.message || 'Authentication failed');
     } finally {
       setIsSubmitting(false);
     }
@@ -44,7 +52,7 @@ export function Login({ onLoginSuccess }) {
 
       <div className="w-full max-w-md bg-slate-900/90 backdrop-blur-xl rounded-3xl border border-slate-800 p-8 shadow-2xl relative z-10">
         {/* Brand Icon & Heading */}
-        <div className="text-center mb-8">
+        <div className="text-center mb-6">
           <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-brand-600 to-cyan-400 text-white flex items-center justify-center mx-auto mb-4 shadow-lg shadow-brand-500/30">
             <ScanFace className="w-8 h-8" />
           </div>
@@ -52,6 +60,28 @@ export function Login({ onLoginSuccess }) {
           <p className="text-xs text-slate-400 mt-1">
             Organization-Based Facial Recognition Attendance System
           </p>
+        </div>
+
+        {/* Mode Selector Tabs */}
+        <div className="flex rounded-xl bg-slate-800/80 p-1 mb-6 border border-slate-700/60">
+          <button
+            type="button"
+            onClick={() => { setMode('login'); setError(''); }}
+            className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+              mode === 'login' ? 'bg-brand-500 text-white shadow-sm' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Sign In
+          </button>
+          <button
+            type="button"
+            onClick={() => { setMode('register'); setError(''); }}
+            className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+              mode === 'register' ? 'bg-brand-500 text-white shadow-sm' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Register Employee
+          </button>
         </div>
 
         {error && (
@@ -63,6 +93,61 @@ export function Login({ onLoginSuccess }) {
 
         {/* Credentials Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
+          {mode === 'register' && (
+            <>
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1.5">
+                  Full Name
+                </label>
+                <div className="relative">
+                  <User className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    placeholder="e.g. Rachel Adams"
+                    className="w-full pl-9 pr-4 py-2 bg-slate-800/80 border border-slate-700 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1.5">
+                  Employee ID
+                </label>
+                <div className="relative">
+                  <IdCard className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    value={employeeId}
+                    onChange={(e) => setEmployeeId(e.target.value)}
+                    placeholder="e.g. EMP-201"
+                    className="w-full pl-9 pr-4 py-2 bg-slate-800/80 border border-slate-700 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1.5">
+                  Department
+                </label>
+                <select
+                  value={department}
+                  onChange={(e) => setDepartment(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-800/80 border border-slate-700 rounded-xl text-sm text-white focus:outline-none focus:border-brand-500"
+                >
+                  <option value="Engineering Department">Engineering Department</option>
+                  <option value="Design & UX">Design & UX</option>
+                  <option value="Product Management">Product Management</option>
+                  <option value="Operations">Operations</option>
+                  <option value="Quality Assurance">Quality Assurance</option>
+                </select>
+              </div>
+            </>
+          )}
+
           <div>
             <label className="text-xs font-semibold text-slate-300 block mb-1.5">
               Organization Email
@@ -102,7 +187,7 @@ export function Login({ onLoginSuccess }) {
             disabled={isSubmitting}
             className="w-full py-3 bg-brand-500 hover:bg-brand-600 disabled:opacity-50 text-white rounded-xl text-sm font-bold shadow-lg shadow-brand-500/25 flex items-center justify-center gap-2 transition"
           >
-            <span>Sign In to Dashboard</span>
+            <span>{mode === 'login' ? 'Sign In to Dashboard' : 'Create Account & Proceed'}</span>
             <ArrowRight className="w-4 h-4" />
           </button>
         </form>

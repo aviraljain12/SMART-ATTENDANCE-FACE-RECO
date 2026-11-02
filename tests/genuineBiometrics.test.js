@@ -244,6 +244,68 @@ async function runTests() {
   assert(!scannerSource.includes("currentUser?.full_name || 'Damian Vance'"),
     '12. AttendanceScanner does NOT contain default Damian Vance fallback in recognitions list');
 
+  // -------------------------------------------------------------
+  // Test 13: FaceEnrollment camera stability & useCamera stream reuse
+  // -------------------------------------------------------------
+  const enrollmentSource = fs.readFileSync('src/components/face-recognition/FaceEnrollment.jsx', 'utf8');
+  assert(!enrollmentSource.includes('[currentStep, isActive, startCamera, stopCamera]'),
+    '13. FaceEnrollment camera effect does NOT depend on [currentStep, isActive] (eliminates restart loop)');
+  assert(enrollmentSource.includes('inCapturePhase'),
+    '13. FaceEnrollment uses stable inCapturePhase boolean for camera lifecycle');
+
+  const cameraHookSource = fs.readFileSync('src/hooks/useCamera.js', 'utf8');
+  assert(cameraHookSource.includes('isExistingStreamLive'),
+    '13. useCamera contains fast-path stream reuse to prevent camera blinking during re-renders');
+
+  // -------------------------------------------------------------
+  // Test 14: Dynamic Employee registration and biometric persistence workflow
+  // -------------------------------------------------------------
+  const { authService } = await import('../src/services/authService.js');
+  const uniqueEmpId = `EMP-${Date.now().toString().slice(-4)}`;
+  const regResult = await authService.register({
+    fullName: 'Jane Doe Biometric Tester',
+    email: `jane.${Date.now()}@example.com`,
+    employeeId: uniqueEmpId,
+    department: 'Quality Assurance',
+  });
+
+  assert(regResult?.user && regResult?.profile, '14. New employee registers successfully');
+  assert(regResult.profile.has_face_registered === false, '14. New employee initializes with has_face_registered = false');
+
+  // Attendance rejected before enrollment
+  const preEnrollmentAttempt = await attendanceService.markAttendance({
+    userId: regResult.user.id,
+    matchConfidence: 0.95,
+  });
+  assert(preEnrollmentAttempt.success === false, '14. Attendance rejected for newly registered unenrolled employee');
+
+  // Biometric enrollment with 3 samples
+  const janeDesc1 = createValidDescriptor(101);
+  const janeDesc2 = createValidDescriptor(102);
+  const janeDesc3 = createValidDescriptor(103);
+  const enrollRes = await userService.registerUserFace({
+    userId: regResult.user.id,
+    descriptors: [janeDesc1, janeDesc2, janeDesc3],
+    consentedAt: new Date().toISOString(),
+  });
+  assert(enrollRes?.success === true, '14. Face samples successfully enrolled and persisted');
+
+  // Verify descriptors retrieved
+  const storedJaneDescriptors = await userService.getUserFaceDescriptors(regResult.user.id);
+  assert(storedJaneDescriptors.length === 3, '14. Exactly 3 genuine descriptors retrieved for newly registered user');
+
+  // Attendance check-in now succeeds
+  const postEnrollmentAttempt = await attendanceService.markAttendance({
+    userId: regResult.user.id,
+    matchConfidence: 0.96,
+  });
+  assert(postEnrollmentAttempt.success === true, '14. Attendance check-in succeeds for newly enrolled employee');
+
+  // Persistence across session reload
+  const sessionUser = await authService.getCurrentUser();
+  assert(sessionUser?.profile?.id === regResult.user.id, '14. Session preserves active user ID');
+  assert(sessionUser?.profile?.has_face_registered === true, '14. Enrollment status remains registered across sessions');
+
   console.log(`\n=== Genuine Biometrics Test Results: ${passed} Passed, ${failed} Failed ===`);
   if (failed > 0) {
     process.exit(1);
@@ -251,3 +313,4 @@ async function runTests() {
 }
 
 runTests();
+

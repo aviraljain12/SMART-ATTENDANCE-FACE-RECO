@@ -39,6 +39,16 @@ export function useCamera() {
     isActiveRef.current = isActive;
   }, [isActive]);
 
+  // Ensure video element gets srcObject whenever it attaches to DOM while camera is active
+  useEffect(() => {
+    if (isActive && streamRef.current && videoRef.current && videoRef.current.srcObject !== streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch((playErr) => {
+        console.warn('Video auto-attach playback warning:', playErr);
+      });
+    }
+  });
+
   // List available video devices (stable callback)
   const updateDeviceList = useCallback(async () => {
     try {
@@ -75,6 +85,31 @@ export function useCamera() {
 
   // Start Camera with request cancellation and playback synchronization
   const startCamera = useCallback(async (deviceIdToUse) => {
+    const targetDeviceId = deviceIdToUse || selectedDeviceIdRef.current;
+
+    // Fast-path: If an active stream already exists for the target device, reuse it without tearing down hardware!
+    const isExistingStreamLive =
+      streamRef.current &&
+      streamRef.current.active &&
+      streamRef.current.getVideoTracks().some((t) => t.readyState === 'live');
+
+    const isSameDevice = !deviceIdToUse || deviceIdToUse === selectedDeviceIdRef.current;
+
+    if (isExistingStreamLive && isSameDevice) {
+      if (videoRef.current && videoRef.current.srcObject !== streamRef.current) {
+        videoRef.current.srcObject = streamRef.current;
+        try {
+          await videoRef.current.play();
+        } catch (playErr) {
+          console.warn('Video playback on stream reuse warning:', playErr);
+        }
+      }
+      setIsActive(true);
+      isActiveRef.current = true;
+      setPermissionState('granted');
+      return;
+    }
+
     requestIdRef.current += 1;
     const currentRequestId = requestIdRef.current;
 
@@ -90,8 +125,6 @@ export function useCamera() {
     }
     setIsActive(false);
     isActiveRef.current = false;
-
-    const targetDeviceId = deviceIdToUse || selectedDeviceIdRef.current;
 
     const constraints = {
       video: targetDeviceId
