@@ -1,0 +1,59 @@
+face-attendance-system/
+│
+├── public/
+│   ├── models/
+│   └── assets/
+│
+├── src/
+│   ├── assets/
+│   │
+│   ├── components/
+│   │   ├── common/
+│   │   ├── layout/
+│   │   ├── dashboard/
+│   │   ├── attendance/
+│   │   └── face-recognition/
+│   │
+│   ├── pages/
+│   │   ├── auth/
+│   │   ├── employee/
+│   │   └── admin/
+│   │
+│   ├── services/
+│   │   ├── supabase.js
+│   │   ├── authService.js
+│   │   ├── attendanceService.js
+│   │   ├── userService.js
+│   │   └── faceRecognitionService.js
+│   │
+│   ├── hooks/
+│   │   ├── useAuth.js
+│   │   ├── useCamera.js
+│   │   └── useFaceRecognition.js
+│   │
+│   ├── context/
+│   │   └── AuthContext.jsx
+│   │
+│   ├── routes/
+│   │   ├── ProtectedRoute.jsx
+│   │   └── AdminRoute.jsx
+│   │
+│   ├── utils/
+│   │   ├── dateUtils.js
+│   │   └── validation.js
+│   │
+│   ├── App.jsx
+│   └── main.jsx
+│
+├── supabase/
+│   ├── migrations/
+│   └── functions/
+│       ├── register-face/
+│       ├── mark-attendance/
+│       ├── get-dashboard-stats/
+│       ├── manage-users/
+│       └── export-attendance/
+│
+├── .env
+├── package.json
+└── README.md
