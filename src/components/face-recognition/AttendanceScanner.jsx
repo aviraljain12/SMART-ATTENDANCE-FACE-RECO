@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { FaceCamera } from './FaceCamera';
 import { useCamera } from '../../hooks/useCamera';
 import { useFaceRecognition } from '../../hooks/useFaceRecognition';
@@ -30,6 +30,35 @@ export function AttendanceScanner({
     switchDevice,
   } = useCamera();
 
+  // Prop ref to prevent identity shifts from restarting hooks
+  const onAttendanceSuccessPropRef = useRef(onAttendanceSuccess);
+  useEffect(() => {
+    onAttendanceSuccessPropRef.current = onAttendanceSuccess;
+  }, [onAttendanceSuccess]);
+
+  const refreshStats = useCallback(async () => {
+    try {
+      const data = await attendanceService.getAdminDashboardMetrics();
+      setStats({
+        total: data?.totalEmployees || 7,
+        present: data?.presentToday || 1,
+      });
+    } catch (err) {
+      console.warn('Could not refresh stats:', err);
+    }
+  }, []);
+
+  const handleAttendanceSuccess = useCallback((record) => {
+    if (onAttendanceSuccessPropRef.current) {
+      try {
+        onAttendanceSuccessPropRef.current(record);
+      } catch (err) {
+        console.error('onAttendanceSuccess callback error:', err);
+      }
+    }
+    refreshStats();
+  }, [refreshStats]);
+
   // Face Recognition Hook
   const {
     status,
@@ -42,11 +71,19 @@ export function AttendanceScanner({
     isActive,
     targetUserId: currentUser?.id,
     autoMarkAttendance: true,
-    onAttendanceSuccess: (record) => {
-      if (onAttendanceSuccess) onAttendanceSuccess(record);
-      refreshStats();
-    },
+    onAttendanceSuccess: handleAttendanceSuccess,
   });
+
+  const handleToggleCamera = useCallback(
+    (start) => {
+      if (start) {
+        startCamera(selectedDeviceId);
+      } else {
+        stopCamera();
+      }
+    },
+    [startCamera, stopCamera, selectedDeviceId]
+  );
 
   // Keep live clock ticking every second
   useEffect(() => {
@@ -56,19 +93,9 @@ export function AttendanceScanner({
     return () => clearInterval(timer);
   }, []);
 
-  const refreshStats = async () => {
-    try {
-      const data = await attendanceService.getAdminDashboardMetrics();
-      setStats({
-        total: data.totalEmployees || 7,
-        present: data.presentToday || 1,
-      });
-    } catch {}
-  };
-
   useEffect(() => {
     refreshStats();
-  }, []);
+  }, [refreshStats]);
 
   const isDark = theme === 'dark';
 
@@ -144,7 +171,7 @@ export function AttendanceScanner({
             devices={devices}
             selectedDeviceId={selectedDeviceId}
             onSwitchDevice={switchDevice}
-            onToggleCamera={(start) => (start ? startCamera(selectedDeviceId) : stopCamera())}
+            onToggleCamera={handleToggleCamera}
             error={error}
             detectedBox={detectedBox}
             status={status}
