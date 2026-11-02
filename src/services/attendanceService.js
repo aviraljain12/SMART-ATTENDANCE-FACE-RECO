@@ -1,6 +1,7 @@
-import { supabase, isSupabaseConfigured } from './supabase';
-import { getMockDB, saveMockDB } from './mockDatabase';
-import { getTodayOrgDateString } from '../utils/dateUtils';
+import { supabase, isSupabaseConfigured } from './supabase.js';
+import { getMockDB, saveMockDB } from './mockDatabase.js';
+import { getTodayOrgDateString } from '../utils/dateUtils.js';
+import { isValidDescriptor } from './faceRecognitionService.js';
 
 export const attendanceService = {
   /**
@@ -43,6 +44,22 @@ export const attendanceService = {
         return edgeData;
       }
 
+      // Check that active biometric registration exists before marking attendance
+      const { data: reg, error: regError } = await supabase
+        .from('face_registrations')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (regError || !reg) {
+        return {
+          success: false,
+          alreadyMarked: false,
+          message: 'Attendance rejected: User has no active biometric enrollment.',
+        };
+      }
+
       // Direct fallback through Supabase table with RLS
       const { data: profile } = await supabase.from('profiles').select('organization_id, full_name').eq('id', userId).single();
       const { data, error } = await supabase
@@ -78,6 +95,18 @@ export const attendanceService = {
     const user = db.users.find((u) => u.id === userId);
     if (!user) throw new Error('User not found');
     if (!user.is_active) throw new Error('User account is inactive');
+
+    // Rule: Require active genuine biometric enrollment (Section 8)
+    const hasActiveBiometrics = db.face_registrations.some(
+      (r) => r.user_id === userId && r.is_active && Array.isArray(r.descriptors) && r.descriptors.some(isValidDescriptor)
+    );
+    if (!hasActiveBiometrics) {
+      return {
+        success: false,
+        alreadyMarked: false,
+        message: 'Attendance rejected: User has no active biometric enrollment.',
+      };
+    }
 
     // Rule: Check duplicate attendance on same date
     const existing = db.attendance.find((a) => a.user_id === userId && a.attendance_date === today);

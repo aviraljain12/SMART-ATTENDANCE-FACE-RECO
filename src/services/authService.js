@@ -1,7 +1,36 @@
-import { supabase, isSupabaseConfigured } from './supabase';
-import { getMockDB, saveMockDB } from './mockDatabase';
+import { supabase, isSupabaseConfigured } from './supabase.js';
+import { getMockDB, saveMockDB } from './mockDatabase.js';
 
 const ACTIVE_USER_SESSION_KEY = 'faceattend_session_user';
+
+let inMemorySessionUser = null;
+
+function getSessionUser() {
+  if (typeof localStorage !== 'undefined') {
+    try {
+      return localStorage.getItem(ACTIVE_USER_SESSION_KEY);
+    } catch {}
+  }
+  return inMemorySessionUser;
+}
+
+function setSessionUser(id) {
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(ACTIVE_USER_SESSION_KEY, id);
+    } catch {}
+  }
+  inMemorySessionUser = id;
+}
+
+function clearSessionUser() {
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(ACTIVE_USER_SESSION_KEY);
+    } catch {}
+  }
+  inMemorySessionUser = null;
+}
 
 export const authService = {
   async getCurrentSession() {
@@ -22,7 +51,7 @@ export const authService = {
     }
 
     // Dual-mode mock session
-    const saved = localStorage.getItem(ACTIVE_USER_SESSION_KEY);
+    const saved = getSessionUser();
     const db = getMockDB();
     if (saved) {
       const user = db.users.find((u) => u.id === saved);
@@ -33,11 +62,15 @@ export const authService = {
 
     // Default to Sourav Roy (EMP-101) from PRD / Screenshot 4
     const defaultUser = db.users.find((u) => u.employee_id === 'EMP-101') || db.users[1];
-    localStorage.setItem(ACTIVE_USER_SESSION_KEY, defaultUser.id);
+    setSessionUser(defaultUser.id);
     return {
       user: { id: defaultUser.id, email: defaultUser.email },
       profile: defaultUser,
     };
+  },
+
+  async getCurrentUser() {
+    return this.getCurrentSession();
   },
 
   async login(email, password) {
@@ -58,8 +91,61 @@ export const authService = {
       throw new Error('This account is inactive. Please contact the administrator.');
     }
 
-    localStorage.setItem(ACTIVE_USER_SESSION_KEY, user.id);
+    setSessionUser(user.id);
     return { user: { id: user.id, email: user.email }, profile: user };
+  },
+
+  async register({ fullName, email, password, employeeId, department = 'Engineering Department' }) {
+    if (!fullName || !email || !employeeId) {
+      throw new Error('Full Name, Email, and Employee ID are required.');
+    }
+
+    if (isSupabaseConfigured) {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password: password || 'DefaultPass123!',
+        options: {
+          data: {
+            full_name: fullName,
+            employee_id: employeeId,
+            department,
+          },
+        },
+      });
+      if (error) throw error;
+      const { data: profile } = await supabase.from('profiles').select('*').eq('id', data.user.id).single();
+      return { user: data.user, profile };
+    }
+
+    const db = getMockDB();
+    const existing = db.users.find(
+      (u) =>
+        u.email.toLowerCase() === email.toLowerCase() ||
+        u.employee_id.toLowerCase() === employeeId.toLowerCase()
+    );
+    if (existing) {
+      throw new Error('An account with this Email or Employee ID already exists.');
+    }
+
+    const newUser = {
+      id: `usr-${Date.now()}`,
+      organization_id: db.organization.id,
+      full_name: fullName,
+      email,
+      employee_id: employeeId,
+      role: 'employee',
+      department,
+      avatar_url: `https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150`,
+      is_active: true,
+      has_face_registered: false,
+      created_at: new Date().toISOString(),
+    };
+
+    db.users.push(newUser);
+    saveMockDB(db);
+
+    setSessionUser(newUser.id);
+    return { user: { id: newUser.id, email: newUser.email }, profile: newUser };
   },
 
   async switchDemoAccount(roleOrEmployeeId) {
@@ -74,7 +160,7 @@ export const authService = {
     }
 
     if (!target) target = db.users[0];
-    localStorage.setItem(ACTIVE_USER_SESSION_KEY, target.id);
+    setSessionUser(target.id);
     return { user: { id: target.id, email: target.email }, profile: target };
   },
 
@@ -82,6 +168,6 @@ export const authService = {
     if (isSupabaseConfigured) {
       await supabase.auth.signOut();
     }
-    localStorage.removeItem(ACTIVE_USER_SESSION_KEY);
+    clearSessionUser();
   },
 };

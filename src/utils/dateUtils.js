@@ -1,5 +1,6 @@
 // Date utilities adhering to organization timezone (Asia/Kolkata default)
-export const DEFAULT_TIMEZONE = import.meta.env.VITE_DEFAULT_TIMEZONE || 'Asia/Kolkata';
+const env = (typeof import.meta !== 'undefined' && import.meta.env) || (typeof process !== 'undefined' && process.env) || {};
+export const DEFAULT_TIMEZONE = env.VITE_DEFAULT_TIMEZONE || 'Asia/Kolkata';
 
 export function getTodayOrgDateString(timezone = DEFAULT_TIMEZONE) {
   try {

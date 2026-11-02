@@ -37,6 +37,13 @@ export function AuthProvider({ children }) {
     return res;
   };
 
+  const register = async (userData) => {
+    const res = await authService.register(userData);
+    setCurrentUser(res.user);
+    setCurrentProfile(res.profile);
+    return res;
+  };
+
   const logout = async () => {
     await authService.logout();
     setCurrentUser(null);
@@ -71,6 +78,7 @@ export function AuthProvider({ children }) {
     isAdmin: currentProfile?.role === 'admin',
     loading,
     login,
+    register,
     logout,
     switchDemoRole,
     refreshProfile,

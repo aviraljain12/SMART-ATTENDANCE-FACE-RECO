@@ -45,6 +45,26 @@ serve(async (req) => {
       });
     }
 
+    // 2b. Verify active biometric registration exists for user
+    const { data: registration, error: regError } = await supabaseClient
+      .from("face_registrations")
+      .select("id")
+      .eq("user_id", user.id)
+      .eq("is_active", true)
+      .maybeSingle();
+
+    if (regError || !registration) {
+      return new Response(
+        JSON.stringify({
+          error: "Biometric enrollment required: no active face registration found for user.",
+        }),
+        {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
+    }
+
     // 3. Determine organization local date
     const localDate = new Intl.DateTimeFormat("en-CA", {
       timeZone: "Asia/Kolkata",
